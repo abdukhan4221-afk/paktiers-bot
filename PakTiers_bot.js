@@ -12,11 +12,11 @@
 
 // ─── CONFIG — FILL THESE IN ─────────────────────────────────
 const CONFIG = {
-  BOT_TOKEN:       'MTUwNDc0NDAxNDUyNjY3NzAwMw.GJO2Ri.3DyGx2PEpAOjY-ANSahl-RPonW6Zbm0E8zmDlY',
-  CLIENT_ID:       '1504744014526677003',
-  GUILD_ID:        '1478080380014952610',
-  TIERER_ROLE_ID:  '1504503176358006834',   // right-click role → Copy Role ID
-  MATCH_CHANNEL_ID:'1504510227322503189',  // channel for match announcements
+  BOT_TOKEN: process.env.BOT_TOKEN,
+  CLIENT_ID: '1504744014526677003',
+  GUILD_ID: '1478080380014952610',
+  TIERER_ROLE_ID: '1504503176358006834',
+  MATCH_CHANNEL_ID: '1504510227322503189',
 };
 // ────────────────────────────────────────────────────────────
 
