@@ -1,0 +1,11 @@
+{
+  "name": "paktiers-bot",
+  "version": "1.0.0",
+  "main": "PakTiers_bot.js",
+  "scripts": {
+    "start": "node PakTiers_bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3"
+  }
+}
