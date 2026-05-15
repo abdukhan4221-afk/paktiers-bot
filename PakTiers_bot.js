@@ -1,24 +1,28 @@
 // ============================================================
-//  PakTiers Discord Bot — Single File Edition
+//  PakTiers Discord Bot — Complete Edition
 //  Pakistan Minecraft Java PvP Rankings & Matchmaking
 // ============================================================
 //
-//  SETUP (do this once):
-//  1. npm install discord.js
-//  2. Fill in the 5 config values below
+//  SETUP:
+//  1. npm install discord.js node-fetch
+//  2. Fill in config below OR use environment variables
 //  3. node PakTiers_bot.js
 //
 // ============================================================
 
-// ─── CONFIG — FILL THESE IN ─────────────────────────────────
 const CONFIG = {
-  BOT_TOKEN: process.env.BOT_TOKEN,
-  CLIENT_ID: '1504744014526677003',
-  GUILD_ID: '1478080380014952610',
-  TIERER_ROLE_ID: '1504503176358006834',
-  MATCH_CHANNEL_ID: '1504510227322503189',
+  BOT_TOKEN:         process.env.BOT_TOKEN,
+  CLIENT_ID:         '1504744014526677003',
+  GUILD_ID:          '1478080380014952610',
+  TIERER_ROLE_ID:    '1504503176358006834',
+  MATCH_CHANNEL_ID:  '1504510227322503189',
+
+  // ── SYNC CHANNEL ─────────────────────────────────────────
+  // Ye channel ID mod (DiscordPoller) read karta hai.
+  // MATCH_CHANNEL_ID se alag private channel rakhna better hai.
+  // Mod config mein bhi yahi ID daalni hai: discordChannelId
+  TIER_SYNC_CHANNEL_ID: process.env.TIER_SYNC_CHANNEL_ID || '1504510227322503189',
 };
-// ────────────────────────────────────────────────────────────
 
 const {
   Client, GatewayIntentBits, Collection, REST, Routes,
@@ -33,8 +37,50 @@ const path = require('path');
 
 const WEAPONS = ['Mace', 'Crystal', 'Sword', 'Axe', 'Netherite'];
 
+// ─── CUSTOM SERVER EMOJIS ────────────────────────────────────
+// Discord server emoji format: <:name:ID>
+// IDs bharne ke liye:
+//   Discord mein emoji type karo (\:vanilla:) → emoji par hover → ID copy karo
+//   Ya Server Settings → Emoji → emoji par right click → Copy Emoji ID
+//
+// Format: <:emojiname:123456789012345678>
+//
+const EMOJI_IDS = {
+  Crystal:   process.env.EMOJI_CRYSTAL   || '',   // :vanilla: emoji ID
+  Mace:      process.env.EMOJI_MACE      || '',   // :mace: emoji ID
+  Netherite: process.env.EMOJI_NETHERITE || '',   // :netherite: emoji ID
+  Sword:     process.env.EMOJI_SWORD     || '',   // :sword: emoji ID
+  Axe:       process.env.EMOJI_AXE       || '',   // :axe: emoji ID
+};
+
+// Custom emoji string banao — agar ID set nahi to fallback emoji use hoga
+function makeEmoji(weapon) {
+  const names = {
+    Crystal: 'vanilla', Mace: 'mace',
+    Netherite: 'netherite', Sword: 'sword', Axe: 'axe',
+  };
+  const fallback = {
+    Crystal: '💠', Mace: '🔨', Netherite: '🪨', Sword: '⚔️', Axe: '🪓',
+  };
+  const id = EMOJI_IDS[weapon];
+  return id ? `<:${names[weapon]}:${id}>` : fallback[weapon];
+}
+
 const WEAPON_EMOJI = {
-  Mace: '🔨', Crystal: '💠', Sword: '⚔️', Axe: '🪓', Netherite: '🪨',
+  Mace:      makeEmoji('Mace'),
+  Crystal:   makeEmoji('Crystal'),
+  Sword:     makeEmoji('Sword'),
+  Axe:       makeEmoji('Axe'),
+  Netherite: makeEmoji('Netherite'),
+};
+
+// mctiers.com API gamemode names — mod ke TierCache ke saath match karna zaroori hai
+const WEAPON_TO_MCTIERS = {
+  Mace:      'mace',
+  Crystal:   'vanilla',   // mctiers.com par Crystal = "vanilla"
+  Sword:     'sword',
+  Axe:       'axe',
+  Netherite: 'netherite',
 };
 
 const TIERS = ['HT1','LT1','HT2','LT2','HT3','LT3','HT4','LT4','HT5','LT5'];
@@ -57,8 +103,8 @@ const TIER_BAR = {
   HT5:'▰▰▱▱▱▱▱▱▱▱', LT5:'▰▱▱▱▱▱▱▱▱▱',
 };
 
-const BRAND_COLOR  = 0x7FFF00;
-const BOT_FOOTER   = 'PakTiers · Pakistan Minecraft Community';
+const BRAND_COLOR = 0x7FFF00;
+const BOT_FOOTER  = 'PakTiers · Pakistan Minecraft Community';
 
 function getRankTitle(pts) {
   if (pts >= 101) return { label:'COMBAT ACE',        emoji:'🔥' };
@@ -78,7 +124,73 @@ function getTierLabel(tier) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  DATABASE  (JSON files in ./data/)
+//  MOJANG UUID FETCH
+//  Discord bot ke paas sirf IGN hota hai — Minecraft UUID
+//  Mojang API se fetch karna padta hai taake mod precisely
+//  TierCache ko UUID se refresh kar sake.
+// ═══════════════════════════════════════════════════════════
+
+const uuidCache = new Map(); // IGN (lowercase) → { uuid, fetchedAt }
+const UUID_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+async function fetchMinecraftUUID(ign) {
+  const key = ign.toLowerCase();
+  const cached = uuidCache.get(key);
+  if (cached && (Date.now() - cached.fetchedAt) < UUID_CACHE_TTL) {
+    return cached.uuid;
+  }
+  try {
+    const res  = await fetch(`https://api.mojang.com/users/profiles/minecraft/${ign}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.id) return null;
+    // Mojang UUID has no dashes — add them: 8-4-4-4-12
+    const raw  = data.id;
+    const uuid = `${raw.slice(0,8)}-${raw.slice(8,12)}-${raw.slice(12,16)}-${raw.slice(16,20)}-${raw.slice(20)}`;
+    uuidCache.set(key, { uuid, fetchedAt: Date.now() });
+    return uuid;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  TIER SYNC EMBED (Bot → Mod)
+//  Ye embed DiscordPoller.parseSyncEmbed() read karta hai.
+//  Fields: player, uuid, weapon (mctiers gamemode), tier
+// ═══════════════════════════════════════════════════════════
+
+async function postTierSyncEmbed(client, player, weapon, tier, tieredByUserId) {
+  if (!CONFIG.TIER_SYNC_CHANNEL_ID) return;
+  try {
+    const ch = await client.channels.fetch(CONFIG.TIER_SYNC_CHANNEL_ID);
+    if (!ch) return;
+
+    // UUID fetch karo taake mod cache precisely refresh kare
+    const uuid = await fetchMinecraftUUID(player.ign);
+    const mctiersGamemode = WEAPON_TO_MCTIERS[weapon] || weapon.toLowerCase();
+
+    await ch.send({
+      embeds: [new EmbedBuilder()
+        .setColor(TIER_COLOR[tier] || BRAND_COLOR)
+        .setTitle('🔄 PakTiers Tier Sync')
+        .setDescription(`Tier update — mod cache refresh hoga automatically.`)
+        .addFields(
+          { name: 'player',   value: player.ign,           inline: true },
+          { name: 'uuid',     value: uuid || 'not-found',  inline: true },
+          { name: 'weapon',   value: mctiersGamemode,       inline: true },
+          { name: 'tier',     value: tier,                  inline: true },
+          { name: 'tieredBy', value: `<@${tieredByUserId}>`, inline: true },
+        )
+        .setTimestamp()
+        .setFooter({ text: BOT_FOOTER })
+      ]
+    });
+  } catch (_) {}
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DATABASE  (JSON files in ./paktiers_data/)
 // ═══════════════════════════════════════════════════════════
 
 const DATA_DIR     = path.join(__dirname, 'paktiers_data');
@@ -92,8 +204,8 @@ init(PLAYERS_FILE, {});
 init(QUEUE_FILE,   { Mace:[], Crystal:[], Sword:[], Axe:[], Netherite:[] });
 init(MATCHES_FILE, []);
 
-const readDB  = f    => JSON.parse(fs.readFileSync(f, 'utf8'));
-const writeDB = (f,d)=> fs.writeFileSync(f, JSON.stringify(d, null, 2));
+const readDB  = f     => JSON.parse(fs.readFileSync(f, 'utf8'));
+const writeDB = (f,d) => fs.writeFileSync(f, JSON.stringify(d, null, 2));
 
 const DB = {
   getPlayer:    id  => readDB(PLAYERS_FILE)[id] || null,
@@ -198,6 +310,9 @@ COMMANDS.register = {
         .setColor(0xFF9933).setTitle('Already Registered')
         .setDescription(`You're already registered as **${ex.ign}**.\nUse \`/profile\` to view your stats.`)] });
     }
+    // Pre-fetch UUID in background
+    fetchMinecraftUUID(ign).catch(() => {});
+
     await interaction.reply({ embeds:[new EmbedBuilder()
       .setColor(BRAND_COLOR)
       .setAuthor({ name:'PakTiers · Pakistan Minecraft Community' })
@@ -335,6 +450,7 @@ COMMANDS.tier = {
       const pts      = TIER_PTS[tier];
       const color    = TIER_COLOR[tier] || BRAND_COLOR;
       const isUpdate = !!oldTier;
+
       await interaction.reply({ embeds:[new EmbedBuilder()
         .setColor(color)
         .setTitle(isUpdate ? '🔄 Tier Updated' : '✅ Tier Assigned')
@@ -347,13 +463,22 @@ COMMANDS.tier = {
             ? { name:'Change', value:`\`${oldTier}\` → \`${tier}\` (+${pts}pts)`, inline:true }
             : { name:'Tier',   value:`\`${tier}\` — ${getTierLabel(tier)} (+${pts}pts)`, inline:true },
           { name:'Tiered By', value:`<@${interaction.user.id}>`, inline:true },
+          { name:'mctiers Gamemode', value:`\`${WEAPON_TO_MCTIERS[weapon]}\``, inline:true },
         )
         .setFooter({ text: BOT_FOOTER }).setTimestamp()] });
+
+      // ── MOD SYNC EMBED ──────────────────────────────────────
+      // Ye embed mod ka DiscordPoller read karta hai
+      // UUID fetch + structured fields = precise cache refresh
+      await postTierSyncEmbed(interaction.client, player, weapon, tier, interaction.user.id);
+      // ────────────────────────────────────────────────────────
+
+      // Player ko DM
       try {
         await target.send({ embeds:[new EmbedBuilder()
           .setColor(color)
           .setTitle(`${WEAPON_EMOJI[weapon]} Your ${weapon} tier has been ${isUpdate?'updated':'assigned'}!`)
-          .setDescription(`**${getTierLabel(tier)}** (\`${tier}\`) · +${pts} pts\n\nYou can now use \`/queue join\` for ${weapon}!`)
+          .setDescription(`**${getTierLabel(tier)}** (\`${tier}\`) · +${pts} pts\n\nYou can now use \`/queue join\` for ${weapon}!\n\n*Your tier will auto-update in TierTagger mod within 60 seconds.*`)
           .setFooter({ text: BOT_FOOTER })] });
       } catch(_) {}
       return;
@@ -376,6 +501,9 @@ COMMANDS.tier = {
           { name:'Removed Tier', value:`\`${removedTier}\``,                  inline:true },
           { name:'Removed By',   value:`<@${interaction.user.id}>`,           inline:true },
         ).setTimestamp()] });
+
+      // Sync embed on remove too — mod cache saaf karega
+      await postTierSyncEmbed(interaction.client, player, weapon, 'REMOVED', interaction.user.id);
     }
   },
 };
@@ -396,7 +524,6 @@ COMMANDS.queue = {
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
 
-    // /queue status
     if (sub === 'status') {
       const queues     = DB.getAllQueues();
       const allPlayers = DB.getAllPlayers();
@@ -414,7 +541,6 @@ COMMANDS.queue = {
         .addFields(fields).setFooter({ text: BOT_FOOTER }).setTimestamp()] });
     }
 
-    // /queue leave
     if (sub === 'leave') {
       const player = DB.getPlayer(interaction.user.id);
       if (!player) return interaction.reply({ ephemeral:true, embeds:[new EmbedBuilder()
@@ -433,7 +559,6 @@ COMMANDS.queue = {
           : `⚠️ You were not in the **${weapon}** queue.`)] });
     }
 
-    // /queue join
     if (sub === 'join') {
       await interaction.deferReply({ ephemeral:true });
       const weapon = interaction.options.getString('weapon');
@@ -455,7 +580,6 @@ COMMANDS.queue = {
           .setColor(0xFF9933).setDescription(`⚠️ You're already in the ${WEAPON_EMOJI[weapon]} **${weapon}** queue.`)] });
       }
 
-      // Match found!
       if (result.match) {
         const [e1,e2] = result.match;
         const p1 = DB.getPlayer(e1.discordId);
@@ -482,7 +606,6 @@ COMMANDS.queue = {
         return interaction.editReply({ embeds:[matchEmbed] });
       }
 
-      // Added to queue
       const q   = DB.getQueue(weapon);
       const pos = q.findIndex(e=>e.discordId===interaction.user.id)+1;
       await interaction.editReply({ embeds:[new EmbedBuilder()
@@ -582,18 +705,19 @@ COMMANDS.help = {
         ].join('\n') },
         { name:'📊 Tiers',   value:'`HT1` › `LT1` › `HT2` › `LT2` › `HT3` › `LT3` › `HT4` › `LT4` › `HT5` › `LT5`' },
         { name:'⚙️ Weapons', value:'🔨 Mace · 💠 Crystal · ⚔️ Sword · 🪓 Axe · 🪨 Netherite' },
+        { name:'🔗 TierTagger Sync', value:'Tiers auto-sync to TierTagger mod in-game within ~60 seconds of assignment.' },
       )
       .setFooter({ text: BOT_FOOTER })] });
   },
 };
 
 // ═══════════════════════════════════════════════════════════
-//  BOT STARTUP — deploys commands then logs in
+//  BOT STARTUP
 // ═══════════════════════════════════════════════════════════
 
 async function deployCommands() {
-  const rest     = new REST({ version:'10' }).setToken(CONFIG.BOT_TOKEN);
-  const bodies   = Object.values(COMMANDS).map(c => c.data.toJSON());
+  const rest   = new REST({ version:'10' }).setToken(CONFIG.BOT_TOKEN);
+  const bodies = Object.values(COMMANDS).map(c => c.data.toJSON());
   await rest.put(Routes.applicationGuildCommands(CONFIG.CLIENT_ID, CONFIG.GUILD_ID), { body:bodies });
   console.log(`✅ Deployed ${bodies.length} slash commands`);
 }
@@ -609,6 +733,7 @@ const client = new Client({
 
 client.once('ready', async () => {
   console.log(`🟢 PakTiers Bot online as ${client.user.tag}`);
+  console.log(`📡 Tier sync channel: ${CONFIG.TIER_SYNC_CHANNEL_ID}`);
   client.user.setPresence({ activities:[{ name:'⚔️ /queue join · PakTiers', type:0 }], status:'online' });
   try { await deployCommands(); } catch(e) { console.error('Command deploy error:', e); }
 });
